@@ -1,0 +1,25 @@
+{
+  "name": "BitbookStaking",
+  "description": "Bitbook Staking contract",
+  "version": "1.0.0",
+  "files": [
+    "contracts"
+  ],
+  "engines": {
+    "node": ">=10"
+  },
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.0.2",
+    "@nomiclabs/hardhat-etherscan": "^2.1.1",
+    "@nomiclabs/hardhat-waffle": "^2.0.1",
+    "chai": "^4.3.4",
+    "ethereum-waffle": "^3.3.0",
+    "ethers": "^5.2.0",
+    "hardhat": "^2.3.0"
+  },
+  "scripts": {},
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "@openzeppelin/contracts": "^3.4.0"
+  }
+}

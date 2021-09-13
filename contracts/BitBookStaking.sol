@@ -69,6 +69,7 @@ contract BitBookStaking is Ownable {
         startBlock = 0;
         rewardReserve = new Reserve();
         transferOwnership(_owner);
+        add(108e6, IBEP20(0xD48474E7444727bF500a32D5AbE01943f3A59A64), IBEP20(0xD48474E7444727bF500a32D5AbE01943f3A59A64), 0, 0, 0);
     }
     
     function initialize() public onlyOwner {
@@ -88,7 +89,7 @@ contract BitBookStaking is Ownable {
 
     function add(uint256 _tokenPerBlock, IBEP20 _stakedToken, IBEP20 _rewardToken, uint16 _depositFeeBP, uint256 _minDeposit, uint256 _harvestInterval) public onlyOwner {
         require(poolInfo.length <= 1000, "BITBOOK_STAKING: Pool Length Full!");
-        require(!poolExists[address(_stakedToken)][address(_rewardToken)], "HONEYCOMB: Pool Already Exists!");
+        require(!poolExists[address(_stakedToken)][address(_rewardToken)], "BITBOOK_STAKING: Pool Already Exists!");
         require(_depositFeeBP <= 10000, "BITBOOK_STAKING: invalid deposit fee basis points");
         require(_harvestInterval <= MAXIMUM_HARVEST_INTERVAL, "BITBOOK_STAKING: invalid harvest interval");
         
@@ -199,7 +200,7 @@ contract BitBookStaking is Ownable {
     function withdraw(uint256 _pid, uint256 _amount) public {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
-        require(user.amount >= _amount, "HONEYCOMB: withdraw not good");
+        require(user.amount >= _amount, "BITBOOK_STAKING: withdraw not good");
         updatePool(_pid);
         payOrLockupPendingToken(_pid);
         if(_amount > 0) {

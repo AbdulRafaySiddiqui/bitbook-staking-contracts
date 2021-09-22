@@ -60,7 +60,8 @@ contract BitBookStaking is Ownable {
     uint256 public constant BONUS_MULTIPLIER = 1;
     uint256 public constant MAXIMUM_HARVEST_INTERVAL = 14 days;
 
-    mapping(address => mapping(address => bool)) poolExists;
+    mapping(address => mapping(address => bool)) internal poolExists;
+    mapping(uint256 => uint256) public rewardDistributions;
 
     PoolInfo[] public poolInfo;
     mapping(uint256 => mapping(address => UserInfo)) public userInfo;
@@ -73,13 +74,20 @@ contract BitBookStaking is Ownable {
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event RewardLockedUp(address indexed user, uint256 indexed pid, uint256 amountLockedUp);
-    event ReferralCommissionPaid(address indexed user, address indexed referrer, uint256 commissionAmount);
+    event PoolUpdated(uint256 tokenPerBlock, uint256 depositFee, uint256 minDeposit, uint256 harvestInterval);
+    event RewardTokenDeposited(address depositer, uint256 pid, uint256 amount);
+    event AdminEmergencyWithdraw(uint256 pid, uint256 currentRewardBalance, uint256 accTokenPerShare, uint256 tokenPerBlock, uint256 lastRewardBlock);
+    event PoolPausedUpdated(bool paused);
+    event DepositLocked(uint256 pid, bool depositLocked);
 
     constructor(
         address _owner,
         IBEP20 token,
         WithdrawFeeInterval[] memory _withdrawFee
     ) public {
+        require(_owner != address(0), "BITBOOK_STAKING: Invalid Owner address");
+        require(address(token) != address(0), "BITBOOK_STAKING: Invalid token address");
+
         startBlock = 0;
         rewardReserve = new Reserve();
         transferOwnership(_owner);
@@ -91,8 +99,8 @@ contract BitBookStaking is Ownable {
         add(108e6, token, token, 0, 0, 0, _withdrawFee);
     }
 
-    function initialize() public onlyOwner {
-        require(!initialized, 'BITBOOK_STAKING: Staking already started!');
+    function initialize() external onlyOwner {
+        require(!initialized, "BITBOOK_STAKING: Staking already started!");
         initialized = true;
         paused = false;
         startBlock = block.number;
@@ -119,10 +127,12 @@ contract BitBookStaking is Ownable {
         uint256 _harvestInterval,
         WithdrawFeeInterval[] memory withdrawFeeIntervals
     ) public onlyOwner {
-        require(poolInfo.length <= 1000, 'BITBOOK_STAKING: Pool Length Full!');
-        require(!poolExists[address(_stakedToken)][address(_rewardToken)], 'BITBOOK_STAKING: Pool Already Exists!');
-        require(_depositFeeBP <= 10000, 'BITBOOK_STAKING: invalid deposit fee basis points');
-        require(_harvestInterval <= MAXIMUM_HARVEST_INTERVAL, 'BITBOOK_STAKING: invalid harvest interval');
+        require(address(_stakedToken) != address(0), "BITBOOK_STAKING: Invalid Staked token address");
+        require(address(_rewardToken) != address(0), "BITBOOK_STAKING: Invalid Reward token address");
+        require(poolInfo.length <= 1000, "BITBOOK_STAKING: Pool Length Full!");
+        require(!poolExists[address(_stakedToken)][address(_rewardToken)], "BITBOOK_STAKING: Pool Already Exists!");
+        require(_depositFeeBP <= 10000, "BITBOOK_STAKING: invalid deposit fee basis points");
+        require(_harvestInterval <= MAXIMUM_HARVEST_INTERVAL, "BITBOOK_STAKING: invalid harvest interval");
 
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
         poolInfo.push(
@@ -140,7 +150,8 @@ contract BitBookStaking is Ownable {
                 lockDeposit: false
             })
         );
-        for (uint256 i = 0; i < withdrawFeeIntervals.length; i++) {
+        uint256 length = withdrawFeeIntervals.length;
+        for (uint256 i = 0; i < length; i++) {
             withdrawFee[poolInfo.length - 1].push(withdrawFeeIntervals[i]);
         }
         poolExists[address(_stakedToken)][address(_rewardToken)] = true;
@@ -152,14 +163,16 @@ contract BitBookStaking is Ownable {
         uint16 _depositFeeBP,
         uint256 _minDeposit,
         uint256 _harvestInterval
-    ) public onlyOwner {
-        require(_depositFeeBP <= 10000, 'BITBOOK_STAKING: invalid deposit fee basis points');
-        require(_harvestInterval <= MAXIMUM_HARVEST_INTERVAL, 'BITBOOK_STAKING: invalid harvest interval');
+    ) external onlyOwner {
+        require(_depositFeeBP <= 10000, "BITBOOK_STAKING: invalid deposit fee basis points");
+        require(_harvestInterval <= MAXIMUM_HARVEST_INTERVAL, "BITBOOK_STAKING: invalid harvest interval");
 
         poolInfo[_pid].tokenPerBlock = _tokenPerBlock;
         poolInfo[_pid].depositFeeBP = _depositFeeBP;
         poolInfo[_pid].minDeposit = _minDeposit;
         poolInfo[_pid].harvestInterval = _harvestInterval;
+
+        emit PoolUpdated(_tokenPerBlock, _depositFeeBP, _minDeposit, _harvestInterval);
     }
 
     function getMultiplier(uint256 _from, uint256 _to) public pure returns (uint256) {
@@ -184,14 +197,7 @@ contract BitBookStaking is Ownable {
 
     function canHarvest(uint256 _pid, address _user) public view returns (bool) {
         UserInfo storage user = userInfo[_pid][_user];
-        return block.timestamp >= user.nextHarvestUntil;
-    }
-
-    function massUpdatePools() public {
-        uint256 length = poolInfo.length;
-        for (uint256 pid = 0; pid < length; ++pid) {
-            updatePool(pid);
-        }
+        return user.amount != 0 && block.timestamp >= user.nextHarvestUntil;
     }
 
     function updatePool(uint256 _pid) public {
@@ -222,17 +228,19 @@ contract BitBookStaking is Ownable {
         _poolInfo.rewardToken.safeTransferFrom(msg.sender, address(rewardReserve), amount);
         uint256 finalBalance = _poolInfo.rewardToken.balanceOf(address(rewardReserve));
         _poolInfo.rewardSupply += finalBalance.sub(initialBalance);
+
+        emit RewardTokenDeposited(msg.sender, poolId, amount);
     }
 
-    function deposit(uint256 _pid, uint256 _amount) public {
-        require(paused == false, 'BITBOOK_STAKING: Paused!');
+    function deposit(uint256 _pid, uint256 _amount) external {
+        require(!paused, "BITBOOK_STAKING: Paused!");
         PoolInfo storage pool = poolInfo[_pid];
-        require(!pool.lockDeposit, 'BITBOOK_STAKING: Deposit Locked!');
+        require(!pool.lockDeposit, "BITBOOK_STAKING: Deposit Locked!");
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
         payOrLockupPendingToken(_pid);
         if (_amount > 0) {
-            require(_amount >= poolInfo[_pid].minDeposit, 'BITBOOK_STAKING: Not Enough Required Staking Tokens!');
+            require(_amount >= poolInfo[_pid].minDeposit, "BITBOOK_STAKING: Not Enough Required Staking Tokens!");
             user.depositTimestamp = block.timestamp;
             uint256 initialBalance = pool.stakedToken.balanceOf(address(this));
             pool.stakedToken.safeTransferFrom(address(msg.sender), address(this), _amount);
@@ -252,10 +260,10 @@ contract BitBookStaking is Ownable {
         emit Deposit(msg.sender, _pid, _amount);
     }
 
-    function withdraw(uint256 _pid, uint256 _amount) public {
+    function withdraw(uint256 _pid, uint256 _amount) external {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
-        require(user.amount >= _amount, 'BITBOOK_STAKING: withdraw not good');
+        require(user.amount >= _amount, "BITBOOK_STAKING: withdraw not good");
         updatePool(_pid);
         payOrLockupPendingToken(_pid);
         uint256 amountToTransfer = _amount;
@@ -289,6 +297,7 @@ contract BitBookStaking is Ownable {
                 user.nextHarvestUntil = block.timestamp.add(pool.harvestInterval);
 
                 rewardReserve.safeTransfer(pool.rewardToken, msg.sender, totalRewards);
+                rewardDistributions[_pid] = rewardDistributions[_pid].add(totalRewards);
             }
         } else if (pending > 0) {
             user.rewardLockedUp = user.rewardLockedUp.add(pending);
@@ -299,38 +308,40 @@ contract BitBookStaking is Ownable {
     function getWithdrawFee(uint256 poolId, uint256 stakedTime) public view returns (uint256) {
         uint256 depositTime = block.timestamp.sub(stakedTime);
         WithdrawFeeInterval[] storage _withdrawFee = withdrawFee[poolId];
-        for (uint256 i = 0; i < _withdrawFee.length; i++) {
+        uint256 length = _withdrawFee.length;
+        for (uint256 i = 0; i < length; i++) {
             if (depositTime <= _withdrawFee[i].day) return _withdrawFee[i].fee;
         }
         return 0;
     }
 
-    function emergencyWithdraw(uint256 _pid) public {
+    function emergencyWithdraw(uint256 _pid) external {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         uint256 amount = user.amount;
-        user.amount = 0;
-        user.rewardDebt = 0;
-        user.rewardLockedUp = 0;
-        user.nextHarvestUntil = 0;
+        require(amount != 0, "BITBOOK_STAKING: Not enought staked tokens!");
         pool.stakedToken.safeTransfer(address(msg.sender), amount);
         emit EmergencyWithdraw(msg.sender, _pid, amount);
+        delete userInfo[_pid][msg.sender];
     }
 
-    function emergencyAdminWithdraw(uint256 _pid) public onlyOwner {
+    function emergencyAdminWithdraw(uint256 _pid) external onlyOwner {
         PoolInfo storage pool = poolInfo[_pid];
-        pool.rewardToken.transfer(owner(), pool.rewardToken.balanceOf(address(this)));
+        uint256 balanceToWithdraw = pool.rewardToken.balanceOf(address(this));
+        require(balanceToWithdraw != 0, "BITBOOK_STAKING: Not enough balance to withdraw!");
+        pool.rewardToken.transfer(owner(), balanceToWithdraw);
         rewardReserve.safeTransfer(pool.rewardToken, owner(), pool.rewardToken.balanceOf(address(rewardReserve)));
-        pool.accTokenPerShare = 0;
-        pool.tokenPerBlock = 0;
-        pool.lastRewardBlock = block.number;
+        emit AdminEmergencyWithdraw(_pid, pool.rewardToken.balanceOf(address(this)), pool.accTokenPerShare, pool.tokenPerBlock, pool.lastRewardBlock);
+        delete poolInfo[_pid];
     }
 
-    function updatePaused(bool _value) public onlyOwner {
+    function updatePaused(bool _value) external onlyOwner {
         paused = _value;
+        emit PoolPausedUpdated(_value);
     }
 
-    function setLockDeposit(uint256 pid, bool locked) public onlyOwner {
+    function setLockDeposit(uint256 pid, bool locked) external onlyOwner {
         poolInfo[pid].lockDeposit = locked;
+        emit DepositLocked(pid, locked);
     }
 }
